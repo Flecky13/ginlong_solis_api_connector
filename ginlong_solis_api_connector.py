@@ -32,6 +32,8 @@ def do_work():  # pylint: disable=too-many-locals disable=too-many-statements
     url = f'{domain}:{port}'
     device_id = int(os.environ['SOLIS_CLOUD_API_INVERTER_ID'])
     override_single_phase_inverter = os.environ['SOLIS_CLOUD_API_OVERRIDE_SINGLE_PHASE_INVERTER']
+    api_retries = int(os.environ['SOLIS_CLOUD_API_NUMBER_RETRIES'])
+    api_retries_timeout_s = int(os.environ['SOLIS_CLOUD_API_RETRIES_WAIT_S'])
 
     # == Constants ===============================================================
     http_function = "POST"
@@ -81,7 +83,7 @@ def do_work():  # pylint: disable=too-many-locals disable=too-many-statements
         return json.dumps(json.loads(input_json), indent=2)
 
     # == post ====================================================================
-    def execute_request(target_url, data, headers) -> str:
+    def execute_request(target_url, data, headers, retries) -> str:
         """execute request and handle errors"""
         if data != "":
             post_data = data.encode("utf-8")
@@ -96,6 +98,11 @@ def do_work():  # pylint: disable=too-many-locals disable=too-many-statements
                 return body_content
         except HTTPError as error:
             error_string = str(error.status) + ": " + error.reason
+
+            if retries > 0:
+                logging.warning(target_url + " -> " + error_string + " | retries left: " + retries )
+                time.sleep(api_retries_timeout_s)
+                execute_request(target_url, data, headers, retries - 1)
         except URLError as error:
             error_string = str(error.reason)
         except TimeoutError:
@@ -138,7 +145,7 @@ def do_work():  # pylint: disable=too-many-locals disable=too-many-statements
                 "Date": now,
                 "Authorization": authorization,
             }
-            data_content = execute_request(url + url_part, data, headers)
+            data_content = execute_request(url + url_part, data, headers, api_retries)
             logging.debug(url + url_part + " -> " + prettify_json(data_content))
             if data_content != "ERROR":
                 return data_content
@@ -146,17 +153,19 @@ def do_work():  # pylint: disable=too-many-locals disable=too-many-statements
     # == get_inverter_list_body ==================================================
     def get_inverter_ids():
         body = '{"userid":"' + api_key_id + '"}'
-        data_content = get_solis_cloud_data(endpoint_station_list, body)
-        data_json = json.loads(data_content)["data"]["page"]["records"]
-        entries = len(data_json["data"]["page"]["records"])
+        data_content = get_solis_cloud_data(endpoint_inverter_list, body)
+        data_json = json.loads(data_content)["data"]["inverterStatusVo"]
+        entries = data_json["all"]-1
         if device_id < 0:
             logging.error("'SOLIS_CLOUD_API_INVERTER_ID' has to be greater or equal to 0 " + \
                           "and lower than %s.", str(entries))
-        if device_id >= entries:
+        if device_id > entries:
             logging.error("Your 'SOLIS_CLOUD_API_INVERTER_ID' (%s" + \
                           ") is larger than or equal to the available number of inverters (" + \
                           "%s). Please select a value between '0' and '%s'.", str(device_id),
                           str(entries), str(entries - 1))
+        data_content = get_solis_cloud_data(endpoint_station_list, body)
+        data_json = json.loads(data_content)["data"]["page"]["records"]
         station_info = data_json[device_id]
         station_id = station_info["id"]
 
@@ -410,7 +419,7 @@ def do_work():  # pylint: disable=too-many-locals disable=too-many-statements
                 msgs.append((mqtt_topic + key, value, 0, False))
 
             logging.debug("writing to MQTT -> %s", msgs)
-            publish.multiple(msgs, hostname=mqtt_server, port=mqtt_port, client_id=mqtt_client, auth=auth_settings)
+            publish.multiple(msgs, hostname=mqtt_server, port=mqtt_port, client_id=mqtt_client, auth=auth_settings)  # pylint: disable=line-too-long
 
     if api_key_id == "" or api_key_pw == "":
         logging.error('Key ID and secret are mandatory for Solis Cloud API')
